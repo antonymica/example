@@ -104,35 +104,56 @@ jobs:
   deploy:
     name: Deploy to server
     runs-on: ubuntu-latest
-    needs: build_and_push
+    needs: quality
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
     steps:
-      - name: Deploy via SSH
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Validate deploy secrets
+        run: |
+          test -n "${{ secrets.SSH_HOST }}" || (echo "Missing SSH_HOST" && exit 1)
+          test -n "${{ secrets.SSH_USER }}" || (echo "Missing SSH_USER" && exit 1)
+          test -n "${{ secrets.SSH_PRIVATE_KEY }}" || (echo "Missing SSH_PRIVATE_KEY" && exit 1)
+          test -n "${{ secrets.WORKDIR }}" || (echo "Missing APP_DIR" && exit 1)
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "${{ secrets.SSH_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Ensure remote directory exists
+        run: |
+          ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} \
+            "mkdir -p '${{ secrets.WORKDIR }}'"
+
+      - name: Sync project files to server
+        run: |
+          rsync -az --delete \
+            --exclude ".git" \
+            --exclude ".github" \
+            --exclude "node_modules" \
+            --exclude "dist" \
+            -e "ssh -i ~/.ssh/id_rsa" \
+            ./ ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:${{ secrets.WORKDIR }}/
+
+      - name: Deploy with Docker Compose
         uses: appleboy/ssh-action@v1.0.3
-        env:
-          REGISTRY: ${{ env.REGISTRY }}
-          IMAGE_NAME: ${{ env.IMAGE_NAME }}
-          IMAGE_TAG: ${{ github.ref == 'refs/heads/main' && 'latest' || 'develop' }}
-          APP_DIR: ${{ secrets.WORKDIR }}
-          GHCR_USER: ${{ github.actor }}
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          envs: REGISTRY,IMAGE_NAME,IMAGE_TAG,APP_DIR,GHCR_USER,GHCR_TOKEN
           script: |
             set -euo pipefail
 
-            cd "$APP_DIR"
+            cd "${{ secrets.WORKDIR }}"
 
-            echo "$GHCR_TOKEN" | docker login "$REGISTRY" -u "$GHCR_USER" --password-stdin
+            test -f docker-compose.yml || { echo "docker-compose.yml not found"; exit 1; }
+            test -f Dockerfile || { echo "Dockerfile not found"; exit 1; }
 
-            export APP_IMAGE="$REGISTRY/$IMAGE_NAME"
-            export APP_TAG="$IMAGE_TAG"
-
-            docker compose pull
-            docker compose up -d --remove-orphans
+            docker compose down || true
+            docker compose up -d --build --remove-orphans
 
             docker image prune -af --filter "until=72h" || true
-            docker logout "$REGISTRY" || true
