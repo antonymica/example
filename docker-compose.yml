@@ -1,8 +1,7 @@
 services:
   app:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ${APP_IMAGE}:${APP_TAG}
+    container_name: hello-app
     restart: unless-stopped
     ports:
       - '127.0.0.1:3002:5173'
